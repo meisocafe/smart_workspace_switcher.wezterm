@@ -26,6 +26,8 @@ local pub = {
 	end,
 }
 
+local workspace_stack = {}
+
 ---@param cmd string
 ---@return string
 local run_child_process = function(cmd)
@@ -41,15 +43,43 @@ local run_child_process = function(cmd)
 	return stdout
 end
 
+local contains = function(t, elem)
+	for i, v in pairs(t) do
+		if v == elem then
+			return i
+		end
+	end
+	return false
+end
+
 ---@param choice_table InputSelector_choices
 ---@return InputSelector_choices, workspace_ids
-function pub.choices.get_workspace_elements(choice_table)
+function pub.choices.get_workspace_elements(choice_table, current_workspace)
 	local workspace_ids = {}
-	for _, workspace in ipairs(mux.get_workspace_names()) do
-		table.insert(choice_table, {
-			id = workspace,
-			label = pub.workspace_formatter(workspace),
-		})
+	local workspace_list = mux.get_workspace_names()
+
+	-- Insert in list order
+	for _, workspace in ipairs(workspace_stack) do
+		if contains(workspace_list, workspace) then
+			if workspace ~= current_workspace then
+				table.insert(choice_table, {
+					id = workspace,
+					label = pub.workspace_formatter(workspace),
+				})
+			end
+		end
+	end
+
+	-- Insert remaining workspaes not present in stack
+	for _, workspace in ipairs(workspace_list) do
+		if not contains(workspace_stack, workspace) then
+			if workspace ~= current_workspace then
+				table.insert(choice_table, {
+					id = workspace,
+					label = pub.workspace_formatter(workspace),
+				})
+			end
+		end
 		workspace_ids[workspace] = true
 	end
 	return choice_table, workspace_ids
@@ -80,13 +110,13 @@ end
 ---Returns choices for the InputSelector
 ---@param opts? choice_opts
 ---@return InputSelector_choices
-function pub.get_choices(opts)
+function pub.get_choices(opts, current_workspace)
 	if opts == nil then
 		opts = { extra_args = "" }
 	end
 	---@type InputSelector_choices
 	local choices = {}
-	choices, opts.workspace_ids = pub.choices.get_workspace_elements(choices)
+	choices, opts.workspace_ids = pub.choices.get_workspace_elements(choices, current_workspace)
 	choices = pub.choices.get_zoxide_elements(choices, opts)
 	return choices
 end
@@ -120,9 +150,11 @@ end
 ---@param path string
 ---@param label_path string
 local function zoxide_chosen(window, pane, path, label_path)
+	table.insert(workspace_stack, 1, path)
+
 	window:perform_action(
 		act.SwitchToWorkspace({
-			name = label_path,
+			name = path,
 			spawn = {
 				label = "Workspace: " .. label_path,
 				cwd = path,
@@ -130,12 +162,7 @@ local function zoxide_chosen(window, pane, path, label_path)
 		}),
 		pane
 	)
-	wezterm.emit(
-		"smart_workspace_switcher.workspace_switcher.created",
-		get_current_mux_window(label_path),
-		path,
-		label_path
-	)
+	wezterm.emit("smart_workspace_switcher.workspace_switcher.created", get_current_mux_window(path), path, label_path)
 	-- increment zoxide path score
 	run_child_process(pub.zoxide_path .. " add " .. path)
 end
@@ -146,6 +173,14 @@ end
 ---@param workspace string
 ---@param label_workspace string
 local function workspace_chosen(window, pane, workspace, label_workspace)
+	-- Remove entry form stack and append it to start
+	for i, v in ipairs(workspace_stack) do
+		if v == workspace then
+			table.remove(workspace_stack, i)
+		end
+	end
+	table.insert(workspace_stack, 1, workspace)
+
 	window:perform_action(
 		act.SwitchToWorkspace({
 			name = workspace,
@@ -165,7 +200,8 @@ end
 function pub.switch_workspace(opts)
 	return wezterm.action_callback(function(window, pane)
 		wezterm.emit("smart_workspace_switcher.workspace_switcher.start", window, pane)
-		local choices = pub.get_choices(opts)
+
+		local choices = pub.get_choices(opts, window:active_workspace())
 
 		window:perform_action(
 			act.InputSelector({
@@ -186,12 +222,28 @@ function pub.switch_workspace(opts)
 				end),
 				title = "Choose Workspace",
 				description = "Select a workspace and press Enter = accept, Esc = cancel, / = filter",
-				fuzzy_description = "Workspace to switch: ",
+				fuzzy_description = "Choose Workspace: ",
 				choices = choices,
 				fuzzy = true,
 			}),
 			pane
 		)
+	end)
+end
+
+function pub.switch_previous(index)
+	if index == nil then
+		index = 1
+	end
+	index = index + 1
+
+	return wezterm.action_callback(function(window, pane)
+		local ws = workspace_stack[index]
+		if ws ~= nil then
+			local label = pub.workspace_formatter(ws)
+			wezterm.emit("smart_workspace_switcher.workspace_switcher.selected", window, ws, label)
+			workspace_chosen(window, pane, ws, label)
+		end
 	end)
 end
 
